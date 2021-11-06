@@ -1,8 +1,8 @@
 '''
-Description: 
+Description:
 Author: Li Siheng
 Date: 2021-10-11 11:00:12
-LastEditTime: 2021-10-27 06:50:49
+LastEditTime: 2021-10-12 08:17:21
 '''
 import os
 import sys
@@ -19,31 +19,18 @@ from transformers import AutoTokenizer
 from model.data_model import SDUDataModel, SDUDataset
 from model.base_model import BaseAEModel
 from model.bert_lstm_model import BertLSTMModel
-from model.bert_span_model import BertSpanModel
 from scorer import *
 from argparse import Namespace
 
-def main(args):
 
-    save_path = os.path.join(args.save_dir, args.model_name)
-    save_path = os.path.join(save_path, args.pretrain_model)
+def main(args):
+    save_path = os.path.join(args.save_dir, args.pretrain_model, args.model_name)
 
     if args.model_name == 'BertLSTMModel':
         Model = BertLSTMModel
-        hyparas = 'adversarial: {} - divergence: {} - adv_alpha: {} - adv_nloop: {} - use_crf: {} - bert_lr: {} - lr: {} - rnn_size: {} - rnn_layer: {}'.format(
-            args.adversarial, args.divergence, args.adv_alpha, args.adv_nloop,
-            args.use_crf, args.bert_lr, args.lr, args.rnn_size,
-            args.rnn_nlayer)
+        hyparas = 'use_crf: {} - bert_lr: {} - head_lr: {} - rnn_size: {} - rnn_layer: {} - use_span: {}'.format(
+            args.use_crf, args.bert_lr, args.head_lr, args.rnn_size, args.rnn_nlayer, args.use_span)
         save_path = os.path.join(save_path, hyparas)
-    elif args.model_name == 'BertSpanModel':
-        Model = BertSpanModel
-        hyparas = 'adversarial: {} - divergence: {} - adv_alpha: {} - adv_nloop: {} - use_crf: {} - bert_lr: {} - lr: {} - rnn_size: {} - rnn_layer: {}'.format(
-            args.adversarial, args.divergence, args.adv_alpha, args.adv_nloop,
-            args.use_crf, args.bert_lr, args.lr, args.rnn_size,
-            args.rnn_nlayer)
-        save_path = os.path.join(save_path, hyparas)
-    else:
-        raise ValueError(f"No model_name: {args.model_name}")
 
     if not os.path.exists(save_path):
         os.makedirs(save_path)
@@ -52,13 +39,13 @@ def main(args):
 
     logger = loggers.TensorBoardLogger(save_dir=os.path.join(
         save_path, 'logs/'),
-                                       name='')
+        name='')
     checkpoint = ModelCheckpoint(dirpath=save_path,
                                  save_top_k=1,
-                                 monitor='valid_acc',
-                                 mode='max',
-                                 filename='{epoch:02d}-{valid_acc:.4f}')
-    early_stop = EarlyStopping(monitor='valid_acc', mode='max', patience=5)
+                                 monitor='valid_loss',
+                                 mode='min',
+                                 filename='{epoch:02d}-{valid_loss:.4f}')
+    early_stop = EarlyStopping(monitor='valid_loss', mode='min', patience=3)
     trainer = Trainer.from_argparse_args(args,
                                          logger=logger,
                                          callbacks=[checkpoint, early_stop])
@@ -75,7 +62,7 @@ def main(args):
     else:
         tokenizer = AutoTokenizer.from_pretrained(save_path)
         data_model = SDUDataModel(args, tokenizer)
-        checkpoint_path = os.path.join(save_path, args.checkpoint_path)
+        checkpoint_path = os.path.join(args.checkpoint_path)
 
     # module evaluation
     model = Model.load_from_checkpoint(checkpoint_path, tokenizer=tokenizer)
@@ -83,13 +70,13 @@ def main(args):
 
 
 def evaluation(args, model, data_model, save_path):
-
     data_model.setup('test')
     tokenizer = data_model.tokenizer
     test_loader = data_model.test_dataloader()
 
     device = torch.device('cuda:0')
     model.to(device)
+    model.stage = 'test'
     model.eval()
 
     results = []
@@ -100,12 +87,10 @@ def evaluation(args, model, data_model, save_path):
                                  batch['token_type_ids'].to(device))
 
         for idx, predict in enumerate(predicts):
-
             text = batch['text'][idx]
             offset_mapping = batch['offset_mapping'][idx]
 
-            acronyms, long_forms = data_model.decode(text, predict,
-                                                     offset_mapping)
+            acronyms, long_forms = data_model.decode(text, predict, offset_mapping)
 
             pred = {
                 'ID': batch['idx'][idx],
@@ -123,6 +108,7 @@ def evaluation(args, model, data_model, save_path):
     p, r, f1 = run_evaluation(eval_args)
     print('Official Scores:')
     print('P: {:.2%}, R: {:.2%}, F1: {:.2%}'.format(p, r, f1))
+
 
 if __name__ == '__main__':
     total_parser = argparse.ArgumentParser()
