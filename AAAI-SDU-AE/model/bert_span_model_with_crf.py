@@ -15,7 +15,8 @@ from torchcrf import CRF
 from .base_model import BaseAEModel
 from scorer import *
 
-class BertSpanModel(BaseAEModel):
+
+class BertSpanWCRFModel(BaseAEModel):
     def __init__(self, args, tokenizer) -> None:
         super().__init__(args, tokenizer)
 
@@ -39,12 +40,15 @@ class BertSpanModel(BaseAEModel):
 
         self.dropout = nn.Dropout(args.ffn_dropout)
         self.span_layer = nn.Linear(2 * args.rnn_size, 4, bias=False)
-        self.span_loss = nn.BCEWithLogitsLoss()
+        self.span_loss_fn = nn.BCEWithLogitsLoss()
         self.backup = {}
         self.logits = None
         self.labels = None
 
-    def forward(self, input_ids, attention_mask, token_type_ids, labels=None):
+        self.ffn = nn.Linear(2 * args.rnn_size, 6, bias=False)
+        self.crf = CRF(6, batch_first=True) # 固定为6的label空间
+
+    def forward(self, input_ids, attention_mask, token_type_ids, labels=None, crf_labels=None):
         if "distil" in self.pretrain_model:
             outputs = self.bert(input_ids=input_ids,
                                 attention_mask=attention_mask)
@@ -58,14 +62,18 @@ class BertSpanModel(BaseAEModel):
 
         hidden_state = self.dropout(hidden_state)  # (bs, seq_len, feat_dim)
 
-        logits = self.span_layer(hidden_state)  # (bs, seq_len, 4)
-        self.logits = logits
-        self.labels = labels
+        span_logits = self.span_layer(hidden_state)  # (bs, seq_len, 4)
+        crf_logits = self.ffn(hidden_state) # (bs, seq_len, 6)
+
+        # self.logits = logits
+        # self.labels = labels
 
         loss = None
         if labels is not None:
-            loss = self.span_loss(logits * attention_mask.unsqueeze(-1).expand(-1,-1,4), labels)
-        return loss, logits
+            span_loss = self.span_loss_fn(span_logits, labels)
+            crf_loss = -1 * self.crf(crf_logits, crf_labels, attention_mask.byte(),reduction="mean")
+            loss = span_loss + 0.1 * crf_loss
+        return loss, span_logits
 
     def predict(self, input_ids, attenton_mask, token_type_ids):
         # logits: (bs, seq_len, nlabels)
@@ -76,7 +84,10 @@ class BertSpanModel(BaseAEModel):
         )
         predict = []
         for i in range(logits.shape[-1]):
-            predict.append( (logits[:,:,i] >= 0.5).int().unsqueeze(-1) )
+            if i>=2 and i <=3:
+                predict.append( (logits[:,:,i] >= 0.5).int().unsqueeze(-1) )
+            else:
+                predict.append((logits[:, :, i] >= 0.5).int().unsqueeze(-1))
         predict = torch.cat(predict,dim=-1)
         predict = predict.cpu().tolist()
         return predict
@@ -112,6 +123,15 @@ class BertSpanModel(BaseAEModel):
             loss_adv = self.span_loss(self.logits, self.labels)
             loss_adv.backward()
             self.restore()
+
+    def train_inputs(slef, batch):
+        return {
+            'input_ids': batch['input_ids'],
+            'attention_mask': batch['attention_mask'],
+            'token_type_ids': batch['token_type_ids'],
+            'labels': batch['labels'],
+            'crf_labels': batch['crf_labels'] if 'crf_labels' in batch else None,
+        }
 
     def validation_step(self, batch, batch_idx):
         inputs = self.train_inputs(batch)
